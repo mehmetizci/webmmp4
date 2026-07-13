@@ -1,19 +1,20 @@
 {
   "name": "webmmp4",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm run lint && npm run build"
   },
   "dependencies": {
     "@ffmpeg/ffmpeg": "0.12.15",
     "@ffmpeg/util": "0.12.2",
     "@mediabunny/aac-encoder": "1.50.8",
-    "lucide-react": "^1.24.0",
+    "lucide-react": "1.24.0",
     "mediabunny": "1.50.8",
     "next": "16.2.10",
     "react": "19.2.4",
