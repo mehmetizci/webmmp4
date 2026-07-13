@@ -154,7 +154,6 @@ export class WebCodecsConverter implements Converter {
         width,
         height,
         bitrate: targetVideoBitrate,
-      bitrateMode: 'constant',
         hardwareAcceleration: 'no-preference',
       });
       if (!canAvc) throw new Error('Bu cihaz seçilen H.264 çıkış ayarını desteklemiyor.');
