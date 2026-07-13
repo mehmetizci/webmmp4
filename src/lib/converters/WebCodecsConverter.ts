@@ -55,7 +55,7 @@ export class WebCodecsConverter implements Converter {
         width: 720,
         height: 1280,
         bitrate: 1_000_000,
-        hardwareAcceleration: 'prefer-software',
+        hardwareAcceleration: 'no-preference',
       });
       return supported ? { supported: true } : { supported: false, reason: 'H.264 kodlayıcı desteklenmiyor.' };
     } catch (error) {
@@ -154,7 +154,8 @@ export class WebCodecsConverter implements Converter {
         width,
         height,
         bitrate: targetVideoBitrate,
-        hardwareAcceleration: 'prefer-software',
+      bitrateMode: 'constant',
+        hardwareAcceleration: 'no-preference',
       });
       if (!canAvc) throw new Error('Bu cihaz seçilen H.264 çıkış ayarını desteklemiyor.');
 
@@ -189,7 +190,7 @@ export class WebCodecsConverter implements Converter {
       const video: ConversionVideoOptions = {
         codec: 'avc',
         bitrate: targetVideoBitrate,
-        hardwareAcceleration: 'prefer-software',
+        hardwareAcceleration: 'no-preference',
         forceTranscode: true,
         keyFrameInterval: qualityOption.keyFrameInterval,
         alpha: 'discard',
@@ -315,7 +316,7 @@ export class WebCodecsConverter implements Converter {
       bitrateWithinTolerance: null,
       requestedQuality: null,
       keyFrameInterval: null,
-      hardwareAcceleration: 'prefer-software',
+      hardwareAcceleration: 'no-preference',
       forceTranscode: true,
       conversionValid: null,
       discardedTracks: [],

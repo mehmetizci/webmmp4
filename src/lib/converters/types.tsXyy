@@ -1,0 +1,103 @@
+export type QualityPreset = 'low' | 'standard' | 'high';
+export type ConversionEngine = 'webcodecs' | 'ffmpeg';
+export type ConversionStage =
+  | 'idle'
+  | 'analyzing'
+  | 'loading-engine'
+  | 'preparing'
+  | 'converting'
+  | 'finalizing'
+  | 'completed'
+  | 'error'
+  | 'cancelled';
+
+export interface MediaInfo {
+  duration: number;
+  width: number;
+  height: number;
+  frameRate: number | null;
+  videoCodec: string | null;
+  videoCodecString: string | null;
+  audioCodec: string | null;
+  hasAudio: boolean;
+}
+
+export interface ConversionProgress {
+  stage: ConversionStage;
+  percent: number;
+  processedSeconds: number;
+  totalSeconds: number;
+  elapsedSeconds: number;
+  speed: number | null;
+  message: string;
+}
+
+export interface ConversionResult {
+  blob: Blob;
+  filename: string;
+  inputBytes: number;
+  outputBytes: number;
+  duration: number;
+  elapsedSeconds: number;
+  averageSpeed: number;
+  targetVideoBitrate: number;
+  actualVideoBitrate: number;
+  actualTotalBitrate: number;
+  bitrateDeviationPercent: number;
+  bitrateWithinTolerance: boolean;
+  videoCodec: 'H.264 / AVC';
+  audioCodec: 'AAC' | null;
+  engine: ConversionEngine;
+  source: MediaInfo;
+}
+
+export interface DebugLogEntry {
+  at: number;
+  level: 'info' | 'warn' | 'error';
+  scope: string;
+  message: string;
+}
+
+export interface ConverterDebugInfo {
+  engine: ConversionEngine;
+  stage: ConversionStage;
+  mediabunnyVersion: string | null;
+  mediabunnyApi: 'Conversion' | null;
+  ffmpegLoaded: boolean;
+  inputVideoCodec: string | null;
+  inputVideoCodecString: string | null;
+  inputAudioCodec: string | null;
+  outputVideoCodec: 'avc';
+  outputAudioCodec: 'aac' | null;
+  targetVideoBitrate: number | null;
+  targetAudioBitrate: number | null;
+  actualVideoBitrate: number | null;
+  actualTotalBitrate: number | null;
+  bitrateDeviationPercent: number | null;
+  bitrateWithinTolerance: boolean | null;
+  requestedQuality: QualityPreset | null;
+  keyFrameInterval: number | null;
+  hardwareAcceleration: 'no-preference';
+  forceTranscode: boolean;
+  conversionValid: boolean | null;
+  discardedTracks: string[];
+  lastError: string | null;
+  logs: DebugLogEntry[];
+}
+
+
+export interface ConvertOptions {
+  file: File;
+  quality: QualityPreset;
+  signal?: AbortSignal;
+  onProgress?: (progress: ConversionProgress) => void;
+  onInfo?: (info: MediaInfo) => void;
+  onDebug?: (debug: ConverterDebugInfo) => void;
+}
+
+export interface Converter {
+  checkSupport(): Prise<{ supported: boolean; reason?: string }>;
+  convert(options: ConvertOptions): Promise<ConversionResult>;
+  cleanup(): Promise<void>;
+}
+/
