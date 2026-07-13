@@ -1,49 +1,27 @@
-# WebM to MP4 Dönüştürücü
+# WebM → MP4
 
-WebM videolarınızı tarayıcınızda MP4 formatına dönüştürün. Dosyalar herhangi bir sunucuya yüklenmez - tüm işlem cihazınızda gerçekleştirilir.
+Tarayıcı içinde çalışan WebM → MP4 dönüştürücü.
 
-## Özellikler
-
-- 🌐 **Tamamen Tarayıcıda Çalışır** - Videolar sunucuya gönderilmez
-- 🔒 **Gizlilik Odaklı** - Dosyalar cihazınızdan ayrılmaz
-- 📱 **Mobil Uyumlu** - Responsive tasarım
-- 🎬 **FFmpeg WebAssembly** - Tarayıcıda profesyonel video dönüşümü
-- ⚡ **Hızlı Yükleme** - FFmpeg yalnızca dönüşüm başladığında yüklenir
-
-## Teknolojiler
-
-- Next.js 16 (App Router)
-- TypeScript
-- Tailwind CSS
-- FFmpeg WebAssembly
-- Lucide React
-
-## Kurulum
-
-```bash
-pnpm install
-```
+- Mediabunny 1.50.8 yüksek seviyeli `Conversion` API
+- WebCodecs ile VP8/VP9 → H.264/AVC
+- Ses varsa Opus/Vorbis → AAC
+- FFmpeg WebAssembly fallback
+- Kalite profilleri yalnızca hedef video bitrate değerini değiştirir
+- Dosya sunucuya yüklenmez
 
 ## Geliştirme
 
 ```bash
-pnpm dev
+npm install
+npm run dev
 ```
 
-## Production Build
+## Kontroller
 
 ```bash
-pnpm build
-pnpm start
+npm run typecheck
+npm run lint
+npm run build
 ```
 
-## Kullanım
-
-1. WebM dosyanızı seçin veya sürükleyip bırakın
-2. Kalite seçeneğini belirleyin (Yüksek, Dengeli, Küçük dosya)
-3. "MP4'e Dönüştür" butonuna tıklayın
-4. Dönüşüm tamamlandığında dosyayı indirin
-
-## Lisans
-
-MIT
+FFmpeg fallback ilk kullanımda resmi ffmpeg.wasm çekirdeğini CDN üzerinden indirir (~31 MB).
