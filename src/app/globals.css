@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: var(--font-inter), system-ui, -apple-system, sans-serif;
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    font-family: var(--font-inter), system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    background-color: #F8FAFC;
+    color: #0F172A;
+  }
+}
+
+/* Indeterminate progress animation */
+@keyframes slide {
+  0% {
+    transform: translateX(-100%);
+    width: 30%;
+  }
+  50% {
+    width: 50%;
+  }
+  100% {
+    transform: translateX(350%);
+    width: 30%;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #CBD5E1;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94A3B8;
+}
+
+::selection {
+  background: #376BFC;
+  color: white;
+}
