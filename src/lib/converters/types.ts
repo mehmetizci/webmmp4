@@ -77,7 +77,10 @@ export interface ConverterDebugInfo {
   bitrateWithinTolerance: boolean | null;
   requestedQuality: QualityPreset | null;
   keyFrameInterval: number | null;
-  hardwareAcceleration: 'no-preference';
+  hardwareAcceleration:
+  | 'no-preference'
+  | 'prefer-hardware'
+  | 'prefer-software';
   forceTranscode: boolean;
   conversionValid: boolean | null;
   discardedTracks: string[];
