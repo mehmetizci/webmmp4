@@ -1,0 +1,2 @@
+import type { BrowserCapabilities } from '@/lib/media/browserCapabilities';
+export function CapabilitySummary({ capabilities }: { capabilities: BrowserCapabilities }) { return <div className="capability-grid"><span>HTTPS: {capabilities.secureContext ? 'Evet' : 'Hayır'}</span><span>WebCodecs: {capabilities.webCodecs ? 'Mevcut' : 'Yok'}</span><span>Wake Lock: {capabilities.wakeLock ? 'Mevcut' : 'Yok'}</span></div>; }

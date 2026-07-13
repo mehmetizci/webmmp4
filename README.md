@@ -1,37 +1,66 @@
 # WebM → MP4 Dönüştürücü
 
-Tarayıcı içinde çalışan, dosyayı sunucuya göndermeden WebM videolarını MP4'e dönüştüren Next.js uygulaması.
+Next.js 16, React 19, TypeScript, Mediabunny 1.50.8 ve FFmpeg WebAssembly ile hazırlanmış, tamamen tarayıcıda çalışan WebM → MP4 dönüştürücü.
+
+## Özellikler
+
+- WebM VP8/VP9 → H.264/AVC MP4
+- Opus/Vorbis → AAC
+- Mediabunny yüksek seviyeli `Conversion` API
+- WebCodecs capability ve codec desteği kontrolü
+- FFmpeg WebAssembly fallback
+- Motor ve kalite seçimi
+- Gerçek zamanlı progress, hız ve kalan süre
+- İptal, Wake Lock ve kaynak temizliği
+- Mobil uyumlu arayüz
+- Teknik debug paneli ve log sistemi
+- Node test runner ile saf fonksiyon testleri
+- GitHub Actions CI
+- Vercel dağıtım ayarları
+
+## Kurulum
+
+```bash
+corepack enable
+pnpm install
+pnpm dev
+```
+
+## Kontroller
+
+```bash
+pnpm typecheck
+pnpm lint
+pnpm test
+pnpm build
+```
+
+veya:
+
+```bash
+pnpm validate
+```
+
+## Vercel
+
+Repo Vercel'e bağlandığında Next.js otomatik algılanır. Node 24 `.nvmrc` ve `package.json#engines` ile belirtilmiştir. Ayrıntılar `docs/DEPLOYMENT.md` dosyasındadır.
+
+## Gizlilik
+
+Video dosyası uygulama sunucusuna yüklenmez. WebCodecs, Mediabunny ve FFmpeg WASM işlemleri kullanıcının tarayıcısında yürütür.
 
 ## Mimari
 
-- **Birincil motor:** Mediabunny 1.50.8 `Conversion` API + WebCodecs
-- **Fallback:** FFmpeg WebAssembly 0.12
-- **Video:** VP8/VP9 → H.264 / AVC
-- **Ses:** Opus/Vorbis → AAC
-- **Çıktı:** MP4 (`fastStart: in-memory`)
+- `src/components`: UI bileşenleri
+- `src/hooks`: orchestration, wake lock ve object URL yönetimi
+- `src/lib/converters`: dönüşüm motorları ve ortak sözleşmeler
+- `src/lib/media`: dosya doğrulama, capability ve indirme yardımcıları
+- `src/lib/progress`: progress hesapları
+- `src/lib/debug`: debug log altyapısı
+- `src/lib/errors`: normalize edilmiş hata modeli
+- `tests`: hızlı saf fonksiyon testleri
+- `docs`: mimari, tarayıcı desteği, test ve dağıtım belgeleri
 
-Mediabunny tarafında manuel frame döngüsü kullanılmaz. Yüksek seviyeli `Conversion` API dahili pipeline ve backpressure yönetimini yürütür. `forceTranscode: true` ve sayısal bitrate ile kalite presetleri gerçek transcode ayarlarına uygulanır.
+## Bilinen sınırlar
 
-## Komutlar
-
-```bash
-npm install
-npm run dev
-npm run typecheck
-npm run lint
-npm run build
-```
-
-## Kalite presetleri
-
-- Düşük: 700 kbps
-- Standart: 1 Mbps
-- Yüksek: 1.5 Mbps
-
-AAC için tarayıcının yerel encoder'ı yoksa `@mediabunny/aac-encoder` devreye girer.
-
-## Notlar
-
-- WebCodecs kullanılabilmesi için HTTPS gerekir.
-- FFmpeg çekirdeği yalnız fallback seçildiğinde CDN üzerinden indirilir (~31 MB).
-- Büyük dosyalarda cihaz belleği ve tarayıcı limitleri geçerlidir.
+Tarayıcı tabanlı dönüşüm performansı ve maksimum dosya boyutu cihazın belleğine, codec donanım desteğine ve tarayıcı uygulamasına bağlıdır. iOS ve Firefox'ta gerçek destek çalışma anında kontrol edilir; gerektiğinde FFmpeg fallback sunulur.

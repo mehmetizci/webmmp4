@@ -1,0 +1,2 @@
+import { ArrowRight, X } from 'lucide-react';
+export function ConversionActions({ busy, onStart, onCancel }: { busy:boolean; onStart:()=>void; onCancel:()=>void }) { return busy ? <button className="button danger convert-button" type="button" onClick={onCancel}><X size={18}/> İptal Et</button> : <button className="button primary convert-button" type="button" onClick={onStart}>MP4&apos;e Dönüştür <ArrowRight size={20}/></button>; }

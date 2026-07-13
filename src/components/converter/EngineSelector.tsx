@@ -1,0 +1,3 @@
+import type { ConversionEngine } from '@/lib/converters/types';
+import { ENGINE_LABELS } from '@/constants/engines';
+export function EngineSelector({ value, onChange, disabled, webCodecsSupported }: { value: ConversionEngine; onChange: (value: ConversionEngine)=>void; disabled?: boolean; webCodecsSupported: boolean }) { return <div className="segmented">{(['webcodecs','ffmpeg'] as ConversionEngine[]).map((engine)=><button type="button" key={engine} className={value===engine?'active':''} disabled={disabled || (engine==='webcodecs'&&!webCodecsSupported)} onClick={()=>onChange(engine)}>{ENGINE_LABELS[engine]}</button>)}</div>; }
