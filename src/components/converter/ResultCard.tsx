@@ -17,7 +17,8 @@ export function ResultCard({ result, url, onReset }: { result: ConversionResult;
         <div><span>Sıkıştırma</span><strong>%{percentSaved(result.inputBytes, result.outputBytes)}</strong></div>
         <div><span>Süre</span><strong>{result.elapsedSeconds.toFixed(1)} sn</strong></div>
         <div><span>Ortalama hız</span><strong>{result.averageSpeed.toFixed(2)}x</strong></div>
-        <div><span>Toplam bitrate</span><strong>{formatBitrate(result.actualTotalBitrate)}</strong></div>
+        <div><span>Video bitrate</span><strong>{formatBitrate(result.actualVideoBitrate)}</strong></div>
+        <div><span>Bitrate sapması</span><strong>{result.bitrateDeviationPercent > 0 ? '+' : ''}{result.bitrateDeviationPercent.toFixed(1)}%</strong></div>
       </div>
       <div className="button-row">
         <a className={`button primary ${url ? '' : 'disabled'}`} href={url ?? undefined} download={result.filename}><Download size={19} /> MP4 Dosyasını İndir</a>

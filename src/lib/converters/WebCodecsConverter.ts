@@ -13,7 +13,7 @@ import {
   type ConversionVideoOptions,
 } from 'mediabunny';
 import { registerAacEncoder } from '@mediabunny/aac-encoder';
-import { getVideoBitrate } from './quality';
+import { BITRATE_TOLERANCE_PERCENT, getQualityOption } from './quality';
 import type {
   ConversionProgress,
   ConversionResult,
@@ -148,7 +148,8 @@ export class WebCodecsConverter implements Converter {
         }
       }
 
-      const targetVideoBitrate = getVideoBitrate(options.quality);
+      const qualityOption = getQualityOption(options.quality);
+      const targetVideoBitrate = qualityOption.bitrate;
       const canAvc = await canEncodeVideo('avc', {
         width,
         height,
@@ -175,6 +176,8 @@ export class WebCodecsConverter implements Converter {
         outputAudioCodec: audioTrack ? 'aac' : null,
         targetVideoBitrate,
         targetAudioBitrate: audioTrack ? AUDIO_BITRATE : null,
+        requestedQuality: options.quality,
+        keyFrameInterval: qualityOption.keyFrameInterval,
       });
       progress('preparing', 4, 0, duration, 'Dönüşüm hazırlanıyor');
 
@@ -188,7 +191,7 @@ export class WebCodecsConverter implements Converter {
         bitrate: targetVideoBitrate,
         hardwareAcceleration: 'no-preference',
         forceTranscode: true,
-        keyFrameInterval: 2,
+        keyFrameInterval: qualityOption.keyFrameInterval,
         alpha: 'discard',
       };
       const audio: ConversionAudioOptions | undefined = audioTrack
@@ -229,10 +232,28 @@ export class WebCodecsConverter implements Converter {
       const blob = new Blob([buffer], { type: 'video/mp4' });
       const elapsedSeconds = Math.max((performance.now() - startedAt) / 1000, 0.001);
       const actualTotalBitrate = duration > 0 ? Math.round((blob.size * 8) / duration) : 0;
+      const estimatedAudioBitrate = audioTrack ? AUDIO_BITRATE : 0;
+      const actualVideoBitrate = Math.max(0, actualTotalBitrate - estimatedAudioBitrate);
+      const bitrateDeviationPercent = targetVideoBitrate > 0
+        ? ((actualVideoBitrate - targetVideoBitrate) / targetVideoBitrate) * 100
+        : 0;
+      const bitrateWithinTolerance = Math.abs(bitrateDeviationPercent) <= BITRATE_TOLERANCE_PERCENT;
 
-      emitDebug({ stage: 'completed' });
+      emitDebug({
+        stage: 'completed',
+        actualVideoBitrate,
+        actualTotalBitrate,
+        bitrateDeviationPercent,
+        bitrateWithinTolerance,
+      });
       progress('completed', 100, duration, duration, 'Dönüşüm tamamlandı');
+      log('info', 'Encoder', `İstenen ayarlar: ${targetVideoBitrate} bps, H.264, keyframe ${qualityOption.keyFrameInterval} sn, forceTranscode=true.`);
       log('info', 'Converter', `Dönüşüm ${elapsedSeconds.toFixed(2)} saniyede tamamlandı.`);
+      log(
+        bitrateWithinTolerance ? 'info' : 'warn',
+        'Bitrate',
+        `Hedef ${targetVideoBitrate} bps, tahmini gerçek video ${actualVideoBitrate} bps, sapma ${bitrateDeviationPercent.toFixed(1)}%.`,
+      );
 
       return {
         blob,
@@ -243,7 +264,10 @@ export class WebCodecsConverter implements Converter {
         elapsedSeconds,
         averageSpeed: duration / elapsedSeconds,
         targetVideoBitrate,
+        actualVideoBitrate,
         actualTotalBitrate,
+        bitrateDeviationPercent,
+        bitrateWithinTolerance,
         videoCodec: 'H.264 / AVC',
         audioCodec: audioTrack ? 'AAC' : null,
         engine: 'webcodecs',
@@ -285,6 +309,12 @@ export class WebCodecsConverter implements Converter {
       outputAudioCodec: null,
       targetVideoBitrate: null,
       targetAudioBitrate: null,
+      actualVideoBitrate: null,
+      actualTotalBitrate: null,
+      bitrateDeviationPercent: null,
+      bitrateWithinTolerance: null,
+      requestedQuality: null,
+      keyFrameInterval: null,
       hardwareAcceleration: 'no-preference',
       forceTranscode: true,
       conversionValid: null,

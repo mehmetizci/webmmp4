@@ -74,6 +74,8 @@ export class FFmpegConverter implements Converter {
         outputAudioCodec: info.hasAudio ? 'aac' : null,
         targetVideoBitrate,
         targetAudioBitrate: info.hasAudio ? AUDIO_BITRATE : null,
+        requestedQuality: options.quality,
+        keyFrameInterval: 2,
       });
 
       emitDebug({ stage: 'loading-engine' });
@@ -125,7 +127,18 @@ export class FFmpegConverter implements Converter {
       const blob = new Blob([bytes], { type: 'video/mp4' });
       const elapsedSeconds = Math.max((performance.now() - startedAt) / 1000, 0.001);
       const actualTotalBitrate = info.duration > 0 ? Math.round((blob.size * 8) / info.duration) : 0;
-      emitDebug({ stage: 'completed' });
+      const actualVideoBitrate = Math.max(0, actualTotalBitrate - (info.hasAudio ? AUDIO_BITRATE : 0));
+      const bitrateDeviationPercent = targetVideoBitrate > 0
+        ? ((actualVideoBitrate - targetVideoBitrate) / targetVideoBitrate) * 100
+        : 0;
+      const bitrateWithinTolerance = Math.abs(bitrateDeviationPercent) <= 15;
+      emitDebug({
+        stage: 'completed',
+        actualVideoBitrate,
+        actualTotalBitrate,
+        bitrateDeviationPercent,
+        bitrateWithinTolerance,
+      });
       progress('completed', 100, info.duration, info.duration, 'Dönüşüm tamamlandı');
       await this.safeDelete(inputName);
       await this.safeDelete(outputFile);
@@ -139,7 +152,10 @@ export class FFmpegConverter implements Converter {
         elapsedSeconds,
         averageSpeed: info.duration / elapsedSeconds,
         targetVideoBitrate,
+        actualVideoBitrate,
         actualTotalBitrate,
+        bitrateDeviationPercent,
+        bitrateWithinTolerance,
         videoCodec: 'H.264 / AVC',
         audioCodec: info.hasAudio ? 'AAC' : null,
         engine: 'ffmpeg',
@@ -194,6 +210,12 @@ export class FFmpegConverter implements Converter {
       outputAudioCodec: null,
       targetVideoBitrate: null,
       targetAudioBitrate: null,
+      actualVideoBitrate: null,
+      actualTotalBitrate: null,
+      bitrateDeviationPercent: null,
+      bitrateWithinTolerance: null,
+      requestedQuality: null,
+      keyFrameInterval: null,
       hardwareAcceleration: 'no-preference',
       forceTranscode: true,
       conversionValid: null,

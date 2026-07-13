@@ -41,7 +41,10 @@ export interface ConversionResult {
   elapsedSeconds: number;
   averageSpeed: number;
   targetVideoBitrate: number;
+  actualVideoBitrate: number;
   actualTotalBitrate: number;
+  bitrateDeviationPercent: number;
+  bitrateWithinTolerance: boolean;
   videoCodec: 'H.264 / AVC';
   audioCodec: 'AAC' | null;
   engine: ConversionEngine;
@@ -68,6 +71,12 @@ export interface ConverterDebugInfo {
   outputAudioCodec: 'aac' | null;
   targetVideoBitrate: number | null;
   targetAudioBitrate: number | null;
+  actualVideoBitrate: number | null;
+  actualTotalBitrate: number | null;
+  bitrateDeviationPercent: number | null;
+  bitrateWithinTolerance: boolean | null;
+  requestedQuality: QualityPreset | null;
+  keyFrameInterval: number | null;
   hardwareAcceleration: 'no-preference';
   forceTranscode: boolean;
   conversionValid: boolean | null;
