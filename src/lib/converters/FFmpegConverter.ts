@@ -2,6 +2,7 @@ import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
 import { analyzeMedia } from './mediaInfo';
 import { getVideoBitrate } from './quality';
+
 import type {
   ConversionProgress,
   ConversionResult,
@@ -11,233 +12,466 @@ import type {
   DebugLogEntry,
 } from './types';
 
-const CORE_BASE_URL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd';
+const CORE_BASE_URL =
+  'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd';
+
 const AUDIO_BITRATE = 128_000;
-const STARTUP_GRACE_MS = 120_000;
-const INACTIVITY_TIMEOUT_MS = 90_000;
-const ABSOLUTE_TIMEOUT_MS = 30 * 60_000;
 
-function outputName(inputName: string): string {
-  return `${inputName.replace(/\.webm$/i, '')}.mp4`;
+function createInputName(): string {
+  return `input-${Date.now()}.webm`;
 }
 
-function parseClock(value: string): number | null {
-  const match = value.trim().match(/^(\d+):(\d{2}):(\d{2}(?:\.\d+)?)$/);
-  if (!match) return null;
-  const hours = Number(match[1]);
-  const minutes = Number(match[2]);
-  const seconds = Number(match[3]);
-  if (![hours, minutes, seconds].every(Number.isFinite)) return null;
-  return hours * 3600 + minutes * 60 + seconds;
+function createOutputName(): string {
+  return `output-${Date.now()}.mp4`;
 }
 
-function parseProgressSeconds(message: string, duration: number): number | null {
-  const outTimeUs = message.match(/(?:^|\s)out_time_us=(\d+)/i);
-  if (outTimeUs) return Number(outTimeUs[1]) / 1_000_000;
-
-  // FFmpeg's out_time_ms is historically expressed in microseconds despite its name.
-  const outTimeMs = message.match(/(?:^|\s)out_time_ms=(\d+)/i);
-  if (outTimeMs) {
-    const raw = Number(outTimeMs[1]);
-    if (!Number.isFinite(raw)) return null;
-    const microsecondsValue = raw / 1_000_000;
-    const millisecondsValue = raw / 1_000;
-    return microsecondsValue <= duration * 1.25 + 1 ? microsecondsValue : millisecondsValue;
-  }
-
-  const outTime = message.match(/(?:^|\s)out_time=([^\s]+)/i);
-  if (outTime) return parseClock(outTime[1]);
-
-  const statsTime = message.match(/(?:^|\s)time=(\d+:\d{2}:\d{2}(?:\.\d+)?)/i);
-  if (statsTime) return parseClock(statsTime[1]);
-
-  return null;
+function createDownloadName(inputName: string): string {
+  const baseName = inputName.replace(/\.[^.]+$/i, '');
+  return `${baseName}.mp4`;
 }
 
 export class FFmpegConverter implements Converter {
   private ffmpeg: FFmpeg | null = null;
   private loaded = false;
+  private loadingPromise: Promise<void> | null = null;
   private debug = this.createDebug();
 
-  async checkSupport(): Promise<{ supported: boolean; reason?: string }> {
-    return typeof WebAssembly !== 'undefined'
-      ? { supported: true }
-      : { supported: false, reason: 'WebAssembly bu tarayıcıda kullanılamıyor.' };
+  async checkSupport(): Promise<{
+    supported: boolean;
+    reason?: string;
+  }> {
+    if (typeof WebAssembly === 'undefined') {
+      return {
+        supported: false,
+        reason: 'WebAssembly bu tarayıcıda kullanılamıyor.',
+      };
+    }
+
+    return { supported: true };
   }
 
   async convert(options: ConvertOptions): Promise<ConversionResult> {
     const startedAt = performance.now();
-    const inputName = `input-${Date.now()}.webm`;
-    const outputFile = `output-${Date.now()}.mp4`;
+    const inputName = createInputName();
+    const outputName = createOutputName();
+
+    let progressListenerAttached = false;
+    let logListenerAttached = false;
+    let abortListenerAttached = false;
+
+    let lastPercent = 8;
+    let lastProcessedSeconds = 0;
+    let duration = 0;
+
     this.debug = this.createDebug();
 
-    let listenersAttached = false;
-    let abortAttached = false;
-    let watchdogTimer: ReturnType<typeof setInterval> | null = null;
-    let absoluteTimer: ReturnType<typeof setTimeout> | null = null;
-    let rejectWatchdog: ((reason?: unknown) => void) | null = null;
-    let lastActivityAt = Date.now();
-    let lastProcessedSeconds = 0;
-    let lastPercent = 8;
-    let conversionStartedAt = 0;
+    const emitDebug = (
+      patch: Partial<ConverterDebugInfo>,
+    ): void => {
+      this.debug = {
+        ...this.debug,
+        ...patch,
+      };
 
-    const emitDebug = (patch: Partial<ConverterDebugInfo>) => {
-      this.debug = { ...this.debug, ...patch };
       options.onDebug?.(structuredClone(this.debug));
     };
-    const log = (level: DebugLogEntry['level'], scope: string, message: string) => {
-      emitDebug({ logs: [...this.debug.logs, { at: Date.now(), level, scope, message }].slice(-100) });
+
+    const addLog = (
+      level: DebugLogEntry['level'],
+      scope: string,
+      message: string,
+    ): void => {
+      emitDebug({
+        logs: [
+          ...this.debug.logs,
+          {
+            at: Date.now(),
+            level,
+            scope,
+            message,
+          },
+        ].slice(-100),
+      });
     };
-    const progress = (
+
+    const emitProgress = (
       stage: ConversionProgress['stage'],
       percent: number,
       processedSeconds: number,
       totalSeconds: number,
       message: string,
-    ) => {
-      const elapsedSeconds = Math.max((performance.now() - startedAt) / 1000, 0.001);
+    ): void => {
+      const elapsedSeconds = Math.max(
+        (performance.now() - startedAt) / 1000,
+        0.001,
+      );
+
+      const normalizedProcessed = Math.max(
+        0,
+        Math.min(processedSeconds, totalSeconds || processedSeconds),
+      );
+
       options.onProgress?.({
         stage,
-        percent: Math.max(0, Math.min(100, Math.round(percent))),
-        processedSeconds,
+        percent: Math.max(
+          0,
+          Math.min(100, Math.round(percent)),
+        ),
+        processedSeconds: normalizedProcessed,
         totalSeconds,
         elapsedSeconds,
-        speed: processedSeconds > 0 ? processedSeconds / elapsedSeconds : null,
+        speed:
+          normalizedProcessed > 0
+            ? normalizedProcessed / elapsedSeconds
+            : null,
         message,
       });
     };
 
-    const updateEncodingProgress = (processedSeconds: number, duration: number) => {
-      const processed = Math.max(lastProcessedSeconds, Math.min(processedSeconds, duration));
+    const updateEncodingProgress = (
+      processedSeconds: number,
+    ): void => {
+      if (!Number.isFinite(processedSeconds) || processedSeconds < 0) {
+        return;
+      }
+
+      const processed = Math.max(
+        lastProcessedSeconds,
+        Math.min(processedSeconds, duration),
+      );
+
       lastProcessedSeconds = processed;
-      const ratio = duration > 0 ? Math.max(0, Math.min(1, processed / duration)) : 0;
-      lastPercent = Math.max(lastPercent, 8 + ratio * 90);
-      progress('converting', lastPercent, processed, duration, 'FFmpeg ile dönüştürülüyor');
+
+      const ratio =
+        duration > 0
+          ? Math.max(0, Math.min(1, processed / duration))
+          : 0;
+
+      const calculatedPercent = 8 + ratio * 90;
+
+      lastPercent = Math.max(
+        lastPercent,
+        Math.min(98, calculatedPercent),
+      );
+
+      emitProgress(
+        'converting',
+        lastPercent,
+        processed,
+        duration,
+        'FFmpeg ile dönüştürülüyor',
+      );
     };
 
-    const onProgress = ({ progress: value, time }: { progress: number; time: number }) => {
-      lastActivityAt = Date.now();
-      const processed = Number.isFinite(time) ? time / 1_000_000 : 0;
-      if (processed > 0) updateEncodingProgress(processed, currentDuration);
-      else if (Number.isFinite(value)) {
-        lastPercent = Math.max(lastPercent, 8 + Math.max(0, Math.min(1, value)) * 90);
-        progress('converting', lastPercent, lastProcessedSeconds, currentDuration, 'FFmpeg ile dönüştürülüyor');
+    const onProgress = ({
+      progress,
+      time,
+    }: {
+      progress: number;
+      time: number;
+    }): void => {
+      /*
+       * @ffmpeg/ffmpeg 0.12.x time değerini mikrosaniye
+       * cinsinden bildirir.
+       */
+      const processedSeconds =
+        Number.isFinite(time) && time > 0
+          ? time / 1_000_000
+          : 0;
+
+      if (processedSeconds > 0) {
+        updateEncodingProgress(processedSeconds);
+        return;
+      }
+
+      /*
+       * Bazı dosyalarda yalnızca progress oranı gelebilir.
+       */
+      if (
+        Number.isFinite(progress) &&
+        progress >= 0 &&
+        progress <= 1
+      ) {
+        const processed = duration * progress;
+        updateEncodingProgress(processed);
       }
     };
 
-    let currentDuration = 0;
-    const onLog = ({ message }: { message: string }) => {
-      lastActivityAt = Date.now();
-      const parsed = parseProgressSeconds(message, currentDuration);
-      if (parsed !== null && parsed >= 0) updateEncodingProgress(parsed, currentDuration);
-      if (/progress=end/i.test(message)) {
-        lastPercent = Math.max(lastPercent, 98);
-        progress('converting', 98, currentDuration, currentDuration, 'FFmpeg kodlaması tamamlandı');
+    const onLog = ({
+      message,
+    }: {
+      type: string;
+      message: string;
+    }): void => {
+      /*
+       * Tüm FFmpeg loglarını state'e basmak performansı bozabilir.
+       * Yalnızca önemli satırları debug paneline ekliyoruz.
+       */
+      if (
+        /error|failed|invalid|cannot|unsupported|out of memory/i.test(
+          message,
+        )
+      ) {
+        addLog('warn', 'FFmpeg', message);
       }
-      if (/error|invalid|failed|cannot|out of memory/i.test(message)) log('warn', 'FFmpeg', message);
     };
 
-    const abort = () => {
-      if (this.ffmpeg) this.ffmpeg.terminate();
+    const abort = (): void => {
+      if (this.ffmpeg) {
+        this.ffmpeg.terminate();
+      }
+
       this.ffmpeg = null;
       this.loaded = false;
-      rejectWatchdog?.(new DOMException('Dönüşüm iptal edildi.', 'AbortError'));
+      this.loadingPromise = null;
     };
 
     try {
-      emitDebug({ stage: 'analyzing' });
-      progress('analyzing', 1, 0, 0, 'Video analiz ediliyor');
+      if (options.signal?.aborted) {
+        throw new DOMException(
+          'Dönüşüm iptal edildi.',
+          'AbortError',
+        );
+      }
+
+      emitDebug({
+        stage: 'analyzing',
+      });
+
+      emitProgress(
+        'analyzing',
+        1,
+        0,
+        0,
+        'Video analiz ediliyor',
+      );
+
       const info = await analyzeMedia(options.file);
-      currentDuration = info.duration;
+
+      duration = info.duration;
       options.onInfo?.(info);
-      const targetVideoBitrate = getVideoBitrate(options.quality);
+
+      if (!Number.isFinite(duration) || duration <= 0) {
+        throw new Error('Video süresi belirlenemedi.');
+      }
+
+      const targetVideoBitrate = getVideoBitrate(
+        options.quality,
+      );
+
       emitDebug({
         inputVideoCodec: info.videoCodec,
         inputVideoCodecString: info.videoCodecString,
         inputAudioCodec: info.audioCodec,
+        outputVideoCodec: 'avc',
         outputAudioCodec: info.hasAudio ? 'aac' : null,
         targetVideoBitrate,
-        targetAudioBitrate: info.hasAudio ? AUDIO_BITRATE : null,
+        targetAudioBitrate: info.hasAudio
+          ? AUDIO_BITRATE
+          : null,
         requestedQuality: options.quality,
-        keyFrameInterval: 2,
+        keyFrameInterval: null,
       });
 
-      emitDebug({ stage: 'loading-engine' });
-      progress('loading-engine', 3, 0, info.duration, 'FFmpeg hazırlanıyor');
-      await this.ensureLoaded(log);
-      emitDebug({ ffmpegLoaded: true, stage: 'preparing' });
-      if (!this.ffmpeg) throw new Error('FFmpeg başlatılamadı.');
-      if (options.signal?.aborted) throw new DOMException('Dönüşüm iptal edildi.', 'AbortError');
+      emitDebug({
+        stage: 'loading-engine',
+      });
 
-      progress('preparing', 5, 0, info.duration, 'Dosya FFmpeg belleğine aktarılıyor');
-      await this.ffmpeg.writeFile(inputName, await fetchFile(options.file));
-      lastActivityAt = Date.now();
+      emitProgress(
+        'loading-engine',
+        3,
+        0,
+        duration,
+        'FFmpeg hazırlanıyor',
+      );
+
+      await this.ensureLoaded(addLog);
+
+      if (!this.ffmpeg) {
+        throw new Error('FFmpeg başlatılamadı.');
+      }
+
+      if (options.signal?.aborted) {
+        throw new DOMException(
+          'Dönüşüm iptal edildi.',
+          'AbortError',
+        );
+      }
+
+      emitDebug({
+        ffmpegLoaded: true,
+        stage: 'preparing',
+      });
+
+      emitProgress(
+        'preparing',
+        5,
+        0,
+        duration,
+        'Dosya FFmpeg belleğine aktarılıyor',
+      );
+
+      const inputData = await fetchFile(options.file);
+
+      await this.ffmpeg.writeFile(
+        inputName,
+        inputData,
+      );
+
+      if (options.signal?.aborted) {
+        throw new DOMException(
+          'Dönüşüm iptal edildi.',
+          'AbortError',
+        );
+      }
 
       this.ffmpeg.on('progress', onProgress);
+      progressListenerAttached = true;
+
       this.ffmpeg.on('log', onLog);
-      listenersAttached = true;
-      options.signal?.addEventListener('abort', abort, { once: true });
-      abortAttached = true;
+      logListenerAttached = true;
 
-      const args = [
+      options.signal?.addEventListener(
+        'abort',
+        abort,
+        { once: true },
+      );
+      abortListenerAttached = true;
+
+      const args: string[] = [
         '-y',
-        '-i', inputName,
-        '-c:v', 'libx264',
-        '-preset', 'ultrafast',
-        '-threads', '1',
-        '-b:v', String(targetVideoBitrate),
-        '-maxrate', String(Math.round(targetVideoBitrate * 1.1)),
-        '-bufsize', String(targetVideoBitrate * 2),
-        '-pix_fmt', 'yuv420p',
-        '-movflags', '+faststart',
+
+        '-i',
+        inputName,
+
+        '-c:v',
+        'libx264',
+
+        '-preset',
+        'ultrafast',
+
+        '-b:v',
+        String(targetVideoBitrate),
+
+        '-pix_fmt',
+        'yuv420p',
       ];
-      if (info.hasAudio) args.push('-c:a', 'aac', '-b:a', String(AUDIO_BITRATE));
-      else args.push('-an');
-      args.push('-progress', 'pipe:1', outputFile);
 
-      log('info', 'FFmpeg', `Komut: ffmpeg ${args.join(' ')}`);
-      emitDebug({ stage: 'converting' });
-      progress('converting', 8, 0, info.duration, 'FFmpeg ile dönüştürülüyor');
-      conversionStartedAt = Date.now();
-      lastActivityAt = conversionStartedAt;
+      if (info.hasAudio) {
+        args.push(
+          '-c:a',
+          'aac',
+          '-b:a',
+          String(AUDIO_BITRATE),
+        );
+      } else {
+        args.push('-an');
+      }
 
-      const watchdogPromise = new Promise<never>((_, reject) => {
-        rejectWatchdog = reject;
-        watchdogTimer = setInterval(() => {
-          const now = Date.now();
-          const sinceStart = now - conversionStartedAt;
-          const sinceActivity = now - lastActivityAt;
-          if (sinceStart > STARTUP_GRACE_MS && sinceActivity > INACTIVITY_TIMEOUT_MS) {
-            if (this.ffmpeg) this.ffmpeg.terminate();
-            this.ffmpeg = null;
-            this.loaded = false;
-            reject(new Error('FFmpeg 90 saniyedir ilerleme üretmiyor. İşlem durduruldu.'));
-          }
-        }, 5_000);
-        absoluteTimer = setTimeout(() => {
-          if (this.ffmpeg) this.ffmpeg.terminate();
-          this.ffmpeg = null;
-          this.loaded = false;
-          reject(new Error('FFmpeg dönüşümü 30 dakikalık güvenlik sınırını aştı.'));
-        }, ABSOLUTE_TIMEOUT_MS);
+      args.push(
+        '-movflags',
+        '+faststart',
+        outputName,
+      );
+
+      addLog(
+        'info',
+        'FFmpeg',
+        `Komut: ffmpeg ${args.join(' ')}`,
+      );
+
+      emitDebug({
+        stage: 'converting',
       });
 
-      const code = await Promise.race([this.ffmpeg.exec(args), watchdogPromise]);
-      if (code !== 0) throw new Error(`FFmpeg dönüşümü başarısız oldu (kod: ${code}).`);
+      emitProgress(
+        'converting',
+        8,
+        0,
+        duration,
+        'FFmpeg ile dönüştürülüyor',
+      );
 
-      emitDebug({ stage: 'finalizing' });
-      progress('finalizing', 99, info.duration, info.duration, 'MP4 dosyası hazırlanıyor');
-      const data = await this.ffmpeg.readFile(outputFile);
-      if (typeof data === 'string') throw new Error('FFmpeg geçersiz çıktı döndürdü.');
-      const bytes = new Uint8Array(data);
-      const blob = new Blob([bytes], { type: 'video/mp4' });
-      const elapsedSeconds = Math.max((performance.now() - startedAt) / 1000, 0.001);
-      const actualTotalBitrate = info.duration > 0 ? Math.round((blob.size * 8) / info.duration) : 0;
-      const actualVideoBitrate = Math.max(0, actualTotalBitrate - (info.hasAudio ? AUDIO_BITRATE : 0));
-      const bitrateDeviationPercent = targetVideoBitrate > 0
-        ? ((actualVideoBitrate - targetVideoBitrate) / targetVideoBitrate) * 100
-        : 0;
-      const bitrateWithinTolerance = Math.abs(bitrateDeviationPercent) <= 15;
+      const exitCode = await this.ffmpeg.exec(args);
+
+      if (options.signal?.aborted) {
+        throw new DOMException(
+          'Dönüşüm iptal edildi.',
+          'AbortError',
+        );
+      }
+
+      if (exitCode !== 0) {
+        throw new Error(
+          `FFmpeg dönüşümü başarısız oldu (kod: ${exitCode}).`,
+        );
+      }
+
+      emitDebug({
+        stage: 'finalizing',
+      });
+
+      emitProgress(
+        'finalizing',
+        99,
+        duration,
+        duration,
+        'MP4 dosyası hazırlanıyor',
+      );
+
+      const outputData =
+        await this.ffmpeg.readFile(outputName);
+
+      if (typeof outputData === 'string') {
+        throw new Error(
+          'FFmpeg geçersiz çıktı üretti.',
+        );
+      }
+
+      const bytes = new Uint8Array(outputData);
+
+      if (bytes.byteLength === 0) {
+        throw new Error(
+          'FFmpeg boş bir MP4 dosyası üretti.',
+        );
+      }
+
+      const blob = new Blob(
+        [bytes],
+        {
+          type: 'video/mp4',
+        },
+      );
+
+      const elapsedSeconds = Math.max(
+        (performance.now() - startedAt) / 1000,
+        0.001,
+      );
+
+      const actualTotalBitrate =
+        duration > 0
+          ? Math.round(
+              (blob.size * 8) / duration,
+            )
+          : 0;
+
+      const actualVideoBitrate = Math.max(
+        0,
+        actualTotalBitrate -
+          (info.hasAudio ? AUDIO_BITRATE : 0),
+      );
+
+      const bitrateDeviationPercent =
+        targetVideoBitrate > 0
+          ? ((actualVideoBitrate -
+                targetVideoBitrate) /
+              targetVideoBitrate) *
+            100
+          : 0;
+
+      const bitrateWithinTolerance =
+        Math.abs(bitrateDeviationPercent) <= 15;
+
       emitDebug({
         stage: 'completed',
         actualVideoBitrate,
@@ -245,74 +479,203 @@ export class FFmpegConverter implements Converter {
         bitrateDeviationPercent,
         bitrateWithinTolerance,
       });
-      progress('completed', 100, info.duration, info.duration, 'Dönüşüm tamamlandı');
-      await this.safeDelete(inputName);
-      await this.safeDelete(outputFile);
+
+      emitProgress(
+        'completed',
+        100,
+        duration,
+        duration,
+        'Dönüşüm tamamlandı',
+      );
 
       return {
         blob,
-        filename: outputName(options.file.name),
+        filename: createDownloadName(
+          options.file.name,
+        ),
         inputBytes: options.file.size,
         outputBytes: blob.size,
-        duration: info.duration,
+        duration,
         elapsedSeconds,
-        averageSpeed: info.duration / elapsedSeconds,
+        averageSpeed:
+          duration / elapsedSeconds,
         targetVideoBitrate,
         actualVideoBitrate,
         actualTotalBitrate,
         bitrateDeviationPercent,
         bitrateWithinTolerance,
         videoCodec: 'H.264 / AVC',
-        audioCodec: info.hasAudio ? 'AAC' : null,
+        audioCodec: info.hasAudio
+          ? 'AAC'
+          : null,
         engine: 'ffmpeg',
         source: info,
       };
     } catch (error) {
-      const normalized = error instanceof Error ? error : new Error(String(error));
-      const cancelled = normalized.name === 'AbortError' || options.signal?.aborted;
-      emitDebug({ stage: cancelled ? 'cancelled' : 'error', lastError: normalized.message });
-      log(cancelled ? 'warn' : 'error', 'FFmpeg', normalized.message);
-      if (cancelled && normalized.name !== 'AbortError') {
-        throw new DOMException('Dönüşüm iptal edildi.', 'AbortError');
+      const normalized =
+        error instanceof Error
+          ? error
+          : new Error(String(error));
+
+      const cancelled =
+        normalized.name === 'AbortError' ||
+        options.signal?.aborted === true;
+
+      emitDebug({
+        stage: cancelled
+          ? 'cancelled'
+          : 'error',
+        lastError: normalized.message,
+      });
+
+      addLog(
+        cancelled ? 'warn' : 'error',
+        'FFmpeg',
+        normalized.message,
+      );
+
+      if (cancelled) {
+        throw new DOMException(
+          'Dönüşüm iptal edildi.',
+          'AbortError',
+        );
       }
+
       throw normalized;
     } finally {
-      rejectWatchdog = null;
-      if (watchdogTimer) clearInterval(watchdogTimer);
-      if (absoluteTimer) clearTimeout(absoluteTimer);
-      if (abortAttached) options.signal?.removeEventListener('abort', abort);
-      if (listenersAttached && this.ffmpeg) {
-        this.ffmpeg.off('progress', onProgress);
-        this.ffmpeg.off('log', onLog);
+      /*
+       * Worker terminate edilmişse this.ffmpeg null olabilir.
+       * Listener'lar da worker ile birlikte yok olur.
+       */
+      if (this.ffmpeg) {
+        if (progressListenerAttached) {
+          this.ffmpeg.off(
+            'progress',
+            onProgress,
+          );
+        }
+
+        if (logListenerAttached) {
+          this.ffmpeg.off(
+            'log',
+            onLog,
+          );
+        }
       }
+
+      if (abortListenerAttached) {
+        options.signal?.removeEventListener(
+          'abort',
+          abort,
+        );
+      }
+
       await this.safeDelete(inputName);
-      await this.safeDelete(outputFile);
+      await this.safeDelete(outputName);
     }
   }
 
   async cleanup(): Promise<void> {
-    if (this.ffmpeg) this.ffmpeg.terminate();
+    if (this.ffmpeg) {
+      this.ffmpeg.terminate();
+    }
+
     this.ffmpeg = null;
     this.loaded = false;
+    this.loadingPromise = null;
   }
 
-  private async ensureLoaded(log: (level: DebugLogEntry['level'], scope: string, message: string) => void): Promise<void> {
-    if (this.loaded && this.ffmpeg) return;
-    this.ffmpeg = new FFmpeg();
-    log('info', 'FFmpeg', 'FFmpeg WebAssembly çekirdeği indiriliyor (~31 MB).');
-    await this.ffmpeg.load({
-      coreURL: await toBlobURL(`${CORE_BASE_URL}/ffmpeg-core.js`, 'text/javascript'),
-      wasmURL: await toBlobURL(`${CORE_BASE_URL}/ffmpeg-core.wasm`, 'application/wasm'),
-    });
-    this.loaded = true;
-    log('info', 'FFmpeg', 'FFmpeg WebAssembly hazır.');
-  }
+  private async ensureLoaded(
+    log: (
+      level: DebugLogEntry['level'],
+      scope: string,
+      message: string,
+    ) => void,
+  ): Promise<void> {
+    if (this.loaded && this.ffmpeg) {
+      return;
+    }
 
-  private async safeDelete(path: string): Promise<void> {
+    /*
+     * Aynı anda iki ayrı load işlemi başlamasını engeller.
+     */
+    if (this.loadingPromise) {
+      await this.loadingPromise;
+      return;
+    }
+
+    this.loadingPromise = this.loadFFmpeg(log);
+
     try {
-      await this.ffmpeg?.deleteFile(path);
+      await this.loadingPromise;
+    } finally {
+      this.loadingPromise = null;
+    }
+  }
+
+  private async loadFFmpeg(
+    log: (
+      level: DebugLogEntry['level'],
+      scope: string,
+      message: string,
+    ) => void,
+  ): Promise<void> {
+    const ffmpeg = new FFmpeg();
+
+    log(
+      'info',
+      'FFmpeg',
+      'FFmpeg WebAssembly çekirdeği indiriliyor (~31 MB).',
+    );
+
+    try {
+      const coreURL = await toBlobURL(
+        `${CORE_BASE_URL}/ffmpeg-core.js`,
+        'text/javascript',
+      );
+
+      const wasmURL = await toBlobURL(
+        `${CORE_BASE_URL}/ffmpeg-core.wasm`,
+        'application/wasm',
+      );
+
+      await ffmpeg.load({
+        coreURL,
+        wasmURL,
+      });
+
+      this.ffmpeg = ffmpeg;
+      this.loaded = true;
+
+      log(
+        'info',
+        'FFmpeg',
+        'FFmpeg WebAssembly hazır.',
+      );
+    } catch (error) {
+      ffmpeg.terminate();
+
+      this.ffmpeg = null;
+      this.loaded = false;
+
+      throw error;
+    }
+  }
+
+  private async safeDelete(
+    path: string,
+  ): Promise<void> {
+    if (!this.ffmpeg) {
+      return;
+    }
+
+    try {
+      await this.ffmpeg.deleteFile(path);
     } catch {
-      // Cleanup is best effort.
+      /*
+       * Dosya mevcut değilse cleanup hatası
+       * dönüşümü başarısız yapmamalı.
+       */
     }
   }
 
