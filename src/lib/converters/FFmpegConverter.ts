@@ -13,9 +13,45 @@ import type {
 
 const CORE_BASE_URL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd';
 const AUDIO_BITRATE = 128_000;
+const STARTUP_GRACE_MS = 120_000;
+const INACTIVITY_TIMEOUT_MS = 90_000;
+const ABSOLUTE_TIMEOUT_MS = 30 * 60_000;
 
 function outputName(inputName: string): string {
   return `${inputName.replace(/\.webm$/i, '')}.mp4`;
+}
+
+function parseClock(value: string): number | null {
+  const match = value.trim().match(/^(\d+):(\d{2}):(\d{2}(?:\.\d+)?)$/);
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  const seconds = Number(match[3]);
+  if (![hours, minutes, seconds].every(Number.isFinite)) return null;
+  return hours * 3600 + minutes * 60 + seconds;
+}
+
+function parseProgressSeconds(message: string, duration: number): number | null {
+  const outTimeUs = message.match(/(?:^|\s)out_time_us=(\d+)/i);
+  if (outTimeUs) return Number(outTimeUs[1]) / 1_000_000;
+
+  // FFmpeg's out_time_ms is historically expressed in microseconds despite its name.
+  const outTimeMs = message.match(/(?:^|\s)out_time_ms=(\d+)/i);
+  if (outTimeMs) {
+    const raw = Number(outTimeMs[1]);
+    if (!Number.isFinite(raw)) return null;
+    const microsecondsValue = raw / 1_000_000;
+    const millisecondsValue = raw / 1_000;
+    return microsecondsValue <= duration * 1.25 + 1 ? microsecondsValue : millisecondsValue;
+  }
+
+  const outTime = message.match(/(?:^|\s)out_time=([^\s]+)/i);
+  if (outTime) return parseClock(outTime[1]);
+
+  const statsTime = message.match(/(?:^|\s)time=(\d+:\d{2}:\d{2}(?:\.\d+)?)/i);
+  if (statsTime) return parseClock(statsTime[1]);
+
+  return null;
 }
 
 export class FFmpegConverter implements Converter {
@@ -34,6 +70,16 @@ export class FFmpegConverter implements Converter {
     const inputName = `input-${Date.now()}.webm`;
     const outputFile = `output-${Date.now()}.mp4`;
     this.debug = this.createDebug();
+
+    let listenersAttached = false;
+    let abortAttached = false;
+    let watchdogTimer: ReturnType<typeof setInterval> | null = null;
+    let absoluteTimer: ReturnType<typeof setTimeout> | null = null;
+    let rejectWatchdog: ((reason?: unknown) => void) | null = null;
+    let lastActivityAt = Date.now();
+    let lastProcessedSeconds = 0;
+    let lastPercent = 8;
+    let conversionStartedAt = 0;
 
     const emitDebug = (patch: Partial<ConverterDebugInfo>) => {
       this.debug = { ...this.debug, ...patch };
@@ -61,10 +107,48 @@ export class FFmpegConverter implements Converter {
       });
     };
 
+    const updateEncodingProgress = (processedSeconds: number, duration: number) => {
+      const processed = Math.max(lastProcessedSeconds, Math.min(processedSeconds, duration));
+      lastProcessedSeconds = processed;
+      const ratio = duration > 0 ? Math.max(0, Math.min(1, processed / duration)) : 0;
+      lastPercent = Math.max(lastPercent, 8 + ratio * 90);
+      progress('converting', lastPercent, processed, duration, 'FFmpeg ile dönüştürülüyor');
+    };
+
+    const onProgress = ({ progress: value, time }: { progress: number; time: number }) => {
+      lastActivityAt = Date.now();
+      const processed = Number.isFinite(time) ? time / 1_000_000 : 0;
+      if (processed > 0) updateEncodingProgress(processed, currentDuration);
+      else if (Number.isFinite(value)) {
+        lastPercent = Math.max(lastPercent, 8 + Math.max(0, Math.min(1, value)) * 90);
+        progress('converting', lastPercent, lastProcessedSeconds, currentDuration, 'FFmpeg ile dönüştürülüyor');
+      }
+    };
+
+    let currentDuration = 0;
+    const onLog = ({ message }: { message: string }) => {
+      lastActivityAt = Date.now();
+      const parsed = parseProgressSeconds(message, currentDuration);
+      if (parsed !== null && parsed >= 0) updateEncodingProgress(parsed, currentDuration);
+      if (/progress=end/i.test(message)) {
+        lastPercent = Math.max(lastPercent, 98);
+        progress('converting', 98, currentDuration, currentDuration, 'FFmpeg kodlaması tamamlandı');
+      }
+      if (/error|invalid|failed|cannot|out of memory/i.test(message)) log('warn', 'FFmpeg', message);
+    };
+
+    const abort = () => {
+      if (this.ffmpeg) this.ffmpeg.terminate();
+      this.ffmpeg = null;
+      this.loaded = false;
+      rejectWatchdog?.(new DOMException('Dönüşüm iptal edildi.', 'AbortError'));
+    };
+
     try {
       emitDebug({ stage: 'analyzing' });
       progress('analyzing', 1, 0, 0, 'Video analiz ediliyor');
       const info = await analyzeMedia(options.file);
+      currentDuration = info.duration;
       options.onInfo?.(info);
       const targetVideoBitrate = getVideoBitrate(options.quality);
       emitDebug({
@@ -85,23 +169,22 @@ export class FFmpegConverter implements Converter {
       if (!this.ffmpeg) throw new Error('FFmpeg başlatılamadı.');
       if (options.signal?.aborted) throw new DOMException('Dönüşüm iptal edildi.', 'AbortError');
 
+      progress('preparing', 5, 0, info.duration, 'Dosya FFmpeg belleğine aktarılıyor');
       await this.ffmpeg.writeFile(inputName, await fetchFile(options.file));
-      const onProgress = ({ progress: value, time }: { progress: number; time: number }) => {
-        const processed = Math.min(time / 1_000_000, info.duration);
-        progress('converting', 8 + Math.max(0, Math.min(1, value)) * 89, processed, info.duration, 'FFmpeg ile dönüştürülüyor');
-      };
-      const onLog = ({ message }: { message: string }) => {
-        if (/error|invalid|failed/i.test(message)) log('warn', 'FFmpeg', message);
-      };
+      lastActivityAt = Date.now();
+
       this.ffmpeg.on('progress', onProgress);
       this.ffmpeg.on('log', onLog);
-      const abort = () => this.ffmpeg?.terminate();
+      listenersAttached = true;
       options.signal?.addEventListener('abort', abort, { once: true });
+      abortAttached = true;
 
       const args = [
+        '-y',
         '-i', inputName,
         '-c:v', 'libx264',
-        '-preset', 'veryfast',
+        '-preset', 'ultrafast',
+        '-threads', '1',
         '-b:v', String(targetVideoBitrate),
         '-maxrate', String(Math.round(targetVideoBitrate * 1.1)),
         '-bufsize', String(targetVideoBitrate * 2),
@@ -110,13 +193,36 @@ export class FFmpegConverter implements Converter {
       ];
       if (info.hasAudio) args.push('-c:a', 'aac', '-b:a', String(AUDIO_BITRATE));
       else args.push('-an');
-      args.push(outputFile);
+      args.push('-progress', 'pipe:1', outputFile);
 
+      log('info', 'FFmpeg', `Komut: ffmpeg ${args.join(' ')}`);
       emitDebug({ stage: 'converting' });
-      const code = await this.ffmpeg.exec(args);
-      options.signal?.removeEventListener('abort', abort);
-      this.ffmpeg.off('progress', onProgress);
-      this.ffmpeg.off('log', onLog);
+      progress('converting', 8, 0, info.duration, 'FFmpeg ile dönüştürülüyor');
+      conversionStartedAt = Date.now();
+      lastActivityAt = conversionStartedAt;
+
+      const watchdogPromise = new Promise<never>((_, reject) => {
+        rejectWatchdog = reject;
+        watchdogTimer = setInterval(() => {
+          const now = Date.now();
+          const sinceStart = now - conversionStartedAt;
+          const sinceActivity = now - lastActivityAt;
+          if (sinceStart > STARTUP_GRACE_MS && sinceActivity > INACTIVITY_TIMEOUT_MS) {
+            if (this.ffmpeg) this.ffmpeg.terminate();
+            this.ffmpeg = null;
+            this.loaded = false;
+            reject(new Error('FFmpeg 90 saniyedir ilerleme üretmiyor. İşlem durduruldu.'));
+          }
+        }, 5_000);
+        absoluteTimer = setTimeout(() => {
+          if (this.ffmpeg) this.ffmpeg.terminate();
+          this.ffmpeg = null;
+          this.loaded = false;
+          reject(new Error('FFmpeg dönüşümü 30 dakikalık güvenlik sınırını aştı.'));
+        }, ABSOLUTE_TIMEOUT_MS);
+      });
+
+      const code = await Promise.race([this.ffmpeg.exec(args), watchdogPromise]);
       if (code !== 0) throw new Error(`FFmpeg dönüşümü başarısız oldu (kod: ${code}).`);
 
       emitDebug({ stage: 'finalizing' });
@@ -166,7 +272,21 @@ export class FFmpegConverter implements Converter {
       const cancelled = normalized.name === 'AbortError' || options.signal?.aborted;
       emitDebug({ stage: cancelled ? 'cancelled' : 'error', lastError: normalized.message });
       log(cancelled ? 'warn' : 'error', 'FFmpeg', normalized.message);
+      if (cancelled && normalized.name !== 'AbortError') {
+        throw new DOMException('Dönüşüm iptal edildi.', 'AbortError');
+      }
       throw normalized;
+    } finally {
+      rejectWatchdog = null;
+      if (watchdogTimer) clearInterval(watchdogTimer);
+      if (absoluteTimer) clearTimeout(absoluteTimer);
+      if (abortAttached) options.signal?.removeEventListener('abort', abort);
+      if (listenersAttached && this.ffmpeg) {
+        this.ffmpeg.off('progress', onProgress);
+        this.ffmpeg.off('log', onLog);
+      }
+      await this.safeDelete(inputName);
+      await this.safeDelete(outputFile);
     }
   }
 
