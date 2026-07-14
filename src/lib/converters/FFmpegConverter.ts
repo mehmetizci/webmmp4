@@ -1,7 +1,6 @@
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
 import { analyzeMedia } from './mediaInfo';
-import { getVideoBitrate } from './quality';
 
 import type {
   ConversionProgress,
@@ -15,7 +14,15 @@ import type {
 const CORE_BASE_URL =
   'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd';
 
+const OUTPUT_WIDTH = 720;
+const OUTPUT_HEIGHT = 1280;
+const OUTPUT_FRAMERATE = 30;
+
+const VIDEO_BITRATE = 650_000;
 const AUDIO_BITRATE = 128_000;
+
+const VIDEO_CRF = 28;
+const VIDEO_PRESET = 'medium';
 
 function createInputName(): string {
   return `input-${Date.now()}.webm`;
@@ -52,6 +59,7 @@ export class FFmpegConverter implements Converter {
 
   async convert(options: ConvertOptions): Promise<ConversionResult> {
     const startedAt = performance.now();
+
     const inputName = createInputName();
     const outputName = createOutputName();
 
@@ -59,9 +67,9 @@ export class FFmpegConverter implements Converter {
     let logListenerAttached = false;
     let abortListenerAttached = false;
 
+    let duration = 0;
     let lastPercent = 8;
     let lastProcessedSeconds = 0;
-    let duration = 0;
 
     this.debug = this.createDebug();
 
@@ -106,10 +114,18 @@ export class FFmpegConverter implements Converter {
         0.001,
       );
 
-      const normalizedProcessed = Math.max(
-        0,
-        Math.min(processedSeconds, totalSeconds || processedSeconds),
-      );
+      const safeTotal = Number.isFinite(totalSeconds)
+        ? Math.max(0, totalSeconds)
+        : 0;
+
+      const safeProcessed = Number.isFinite(processedSeconds)
+        ? Math.max(
+            0,
+            safeTotal > 0
+              ? Math.min(processedSeconds, safeTotal)
+              : processedSeconds,
+          )
+        : 0;
 
       options.onProgress?.({
         stage,
@@ -117,12 +133,12 @@ export class FFmpegConverter implements Converter {
           0,
           Math.min(100, Math.round(percent)),
         ),
-        processedSeconds: normalizedProcessed,
-        totalSeconds,
+        processedSeconds: safeProcessed,
+        totalSeconds: safeTotal,
         elapsedSeconds,
         speed:
-          normalizedProcessed > 0
-            ? normalizedProcessed / elapsedSeconds
+          safeProcessed > 0
+            ? safeProcessed / elapsedSeconds
             : null,
         message,
       });
@@ -131,20 +147,28 @@ export class FFmpegConverter implements Converter {
     const updateEncodingProgress = (
       processedSeconds: number,
     ): void => {
-      if (!Number.isFinite(processedSeconds) || processedSeconds < 0) {
+      if (
+        !Number.isFinite(processedSeconds) ||
+        processedSeconds < 0
+      ) {
         return;
       }
 
       const processed = Math.max(
         lastProcessedSeconds,
-        Math.min(processedSeconds, duration),
+        duration > 0
+          ? Math.min(processedSeconds, duration)
+          : processedSeconds,
       );
 
       lastProcessedSeconds = processed;
 
       const ratio =
         duration > 0
-          ? Math.max(0, Math.min(1, processed / duration))
+          ? Math.max(
+              0,
+              Math.min(1, processed / duration),
+            )
           : 0;
 
       const calculatedPercent = 8 + ratio * 90;
@@ -171,8 +195,8 @@ export class FFmpegConverter implements Converter {
       time: number;
     }): void => {
       /*
-       * @ffmpeg/ffmpeg 0.12.x time değerini mikrosaniye
-       * cinsinden bildirir.
+       * @ffmpeg/ffmpeg 0.12.x time değerini
+       * mikrosaniye olarak döndürür.
        */
       const processedSeconds =
         Number.isFinite(time) && time > 0
@@ -185,15 +209,18 @@ export class FFmpegConverter implements Converter {
       }
 
       /*
-       * Bazı dosyalarda yalnızca progress oranı gelebilir.
+       * Bazı dosyalarda time yerine yalnızca
+       * 0–1 aralığında progress oranı gelebilir.
        */
       if (
         Number.isFinite(progress) &&
         progress >= 0 &&
-        progress <= 1
+        progress <= 1 &&
+        duration > 0
       ) {
-        const processed = duration * progress;
-        updateEncodingProgress(processed);
+        updateEncodingProgress(
+          duration * progress,
+        );
       }
     };
 
@@ -204,15 +231,21 @@ export class FFmpegConverter implements Converter {
       message: string;
     }): void => {
       /*
-       * Tüm FFmpeg loglarını state'e basmak performansı bozabilir.
-       * Yalnızca önemli satırları debug paneline ekliyoruz.
+       * Her FFmpeg logunu React state'e taşımak mobilde
+       * performans kaybına neden olabilir.
+       *
+       * Yalnızca önemli hata ve uyarıları debug paneline ekle.
        */
       if (
         /error|failed|invalid|cannot|unsupported|out of memory/i.test(
           message,
         )
       ) {
-        addLog('warn', 'FFmpeg', message);
+        addLog(
+          'warn',
+          'FFmpeg',
+          message,
+        );
       }
     };
 
@@ -246,31 +279,46 @@ export class FFmpegConverter implements Converter {
         'Video analiz ediliyor',
       );
 
-      const info = await analyzeMedia(options.file);
+      const info = await analyzeMedia(
+        options.file,
+      );
 
       duration = info.duration;
-      options.onInfo?.(info);
 
-      if (!Number.isFinite(duration) || duration <= 0) {
-        throw new Error('Video süresi belirlenemedi.');
+      if (
+        !Number.isFinite(duration) ||
+        duration <= 0
+      ) {
+        throw new Error(
+          'Video süresi belirlenemedi.',
+        );
       }
 
-      const targetVideoBitrate = getVideoBitrate(
-        options.quality,
-      );
+      options.onInfo?.(info);
 
       emitDebug({
         inputVideoCodec: info.videoCodec,
-        inputVideoCodecString: info.videoCodecString,
+        inputVideoCodecString:
+          info.videoCodecString,
         inputAudioCodec: info.audioCodec,
+
         outputVideoCodec: 'avc',
-        outputAudioCodec: info.hasAudio ? 'aac' : null,
-        targetVideoBitrate,
+        outputAudioCodec: info.hasAudio
+          ? 'aac'
+          : null,
+
+        targetVideoBitrate: VIDEO_BITRATE,
         targetAudioBitrate: info.hasAudio
           ? AUDIO_BITRATE
           : null,
+
         requestedQuality: options.quality,
         keyFrameInterval: null,
+
+        hardwareAcceleration:
+          'no-preference',
+
+        forceTranscode: true,
       });
 
       emitDebug({
@@ -288,7 +336,9 @@ export class FFmpegConverter implements Converter {
       await this.ensureLoaded(addLog);
 
       if (!this.ffmpeg) {
-        throw new Error('FFmpeg başlatılamadı.');
+        throw new Error(
+          'FFmpeg başlatılamadı.',
+        );
       }
 
       if (options.signal?.aborted) {
@@ -311,7 +361,9 @@ export class FFmpegConverter implements Converter {
         'Dosya FFmpeg belleğine aktarılıyor',
       );
 
-      const inputData = await fetchFile(options.file);
+      const inputData = await fetchFile(
+        options.file,
+      );
 
       await this.ffmpeg.writeFile(
         inputName,
@@ -325,10 +377,18 @@ export class FFmpegConverter implements Converter {
         );
       }
 
-      this.ffmpeg.on('progress', onProgress);
+      this.ffmpeg.on(
+        'progress',
+        onProgress,
+      );
+
       progressListenerAttached = true;
 
-      this.ffmpeg.on('log', onLog);
+      this.ffmpeg.on(
+        'log',
+        onLog,
+      );
+
       logListenerAttached = true;
 
       options.signal?.addEventListener(
@@ -336,7 +396,18 @@ export class FFmpegConverter implements Converter {
         abort,
         { once: true },
       );
+
       abortListenerAttached = true;
+
+      const maxrateKbps = Math.floor(
+        VIDEO_BITRATE / 1000,
+      );
+
+      const filter =
+        `scale=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}` +
+        ':force_original_aspect_ratio=decrease,' +
+        `pad=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}` +
+        ':(ow-iw)/2:(oh-ih)/2';
 
       const args: string[] = [
         '-y',
@@ -348,10 +419,22 @@ export class FFmpegConverter implements Converter {
         'libx264',
 
         '-preset',
-        'ultrafast',
+        VIDEO_PRESET,
 
-        '-b:v',
-        String(targetVideoBitrate),
+        '-crf',
+        String(VIDEO_CRF),
+
+        '-maxrate',
+        `${maxrateKbps}k`,
+
+        '-bufsize',
+        `${maxrateKbps * 2}k`,
+
+        '-vf',
+        filter,
+
+        '-r',
+        String(OUTPUT_FRAMERATE),
 
         '-pix_fmt',
         'yuv420p',
@@ -361,8 +444,9 @@ export class FFmpegConverter implements Converter {
         args.push(
           '-c:a',
           'aac',
+
           '-b:a',
-          String(AUDIO_BITRATE),
+          '128k',
         );
       } else {
         args.push('-an');
@@ -371,6 +455,7 @@ export class FFmpegConverter implements Converter {
       args.push(
         '-movflags',
         '+faststart',
+
         outputName,
       );
 
@@ -392,7 +477,8 @@ export class FFmpegConverter implements Converter {
         'FFmpeg ile dönüştürülüyor',
       );
 
-      const exitCode = await this.ffmpeg.exec(args);
+      const exitCode =
+        await this.ffmpeg.exec(args);
 
       if (options.signal?.aborted) {
         throw new DOMException(
@@ -420,7 +506,9 @@ export class FFmpegConverter implements Converter {
       );
 
       const outputData =
-        await this.ffmpeg.readFile(outputName);
+        await this.ffmpeg.readFile(
+          outputName,
+        );
 
       if (typeof outputData === 'string') {
         throw new Error(
@@ -428,16 +516,24 @@ export class FFmpegConverter implements Converter {
         );
       }
 
-      const bytes = new Uint8Array(outputData);
+      /*
+       * readFile tarafından döndürülen Uint8Array'ın
+       * yalnızca kendi bölümünü kopyala.
+       */
+      const outputBytes = new Uint8Array(
+        outputData.byteLength,
+      );
 
-      if (bytes.byteLength === 0) {
+      outputBytes.set(outputData);
+
+      if (outputBytes.byteLength === 0) {
         throw new Error(
           'FFmpeg boş bir MP4 dosyası üretti.',
         );
       }
 
       const blob = new Blob(
-        [bytes],
+        [outputBytes],
         {
           type: 'video/mp4',
         },
@@ -448,6 +544,10 @@ export class FFmpegConverter implements Converter {
         0.001,
       );
 
+      /*
+       * Bitrate hesabı dönüşüm süresine göre değil,
+       * çıktı videosunun gerçek süresine göre yapılır.
+       */
       const actualTotalBitrate =
         duration > 0
           ? Math.round(
@@ -458,26 +558,35 @@ export class FFmpegConverter implements Converter {
       const actualVideoBitrate = Math.max(
         0,
         actualTotalBitrate -
-          (info.hasAudio ? AUDIO_BITRATE : 0),
+          (info.hasAudio
+            ? AUDIO_BITRATE
+            : 0),
       );
 
       const bitrateDeviationPercent =
-        targetVideoBitrate > 0
+        VIDEO_BITRATE > 0
           ? ((actualVideoBitrate -
-                targetVideoBitrate) /
-              targetVideoBitrate) *
+                VIDEO_BITRATE) /
+              VIDEO_BITRATE) *
             100
           : 0;
 
       const bitrateWithinTolerance =
-        Math.abs(bitrateDeviationPercent) <= 15;
+        Math.abs(
+          bitrateDeviationPercent,
+        ) <= 15;
 
       emitDebug({
         stage: 'completed',
+
         actualVideoBitrate,
         actualTotalBitrate,
+
         bitrateDeviationPercent,
         bitrateWithinTolerance,
+
+        conversionValid:
+          blob.size > 0,
       });
 
       emitProgress(
@@ -490,25 +599,37 @@ export class FFmpegConverter implements Converter {
 
       return {
         blob,
+
         filename: createDownloadName(
           options.file.name,
         ),
+
         inputBytes: options.file.size,
         outputBytes: blob.size,
+
         duration,
         elapsedSeconds,
+
         averageSpeed:
           duration / elapsedSeconds,
-        targetVideoBitrate,
+
+        targetVideoBitrate:
+          VIDEO_BITRATE,
+
         actualVideoBitrate,
         actualTotalBitrate,
+
         bitrateDeviationPercent,
         bitrateWithinTolerance,
+
         videoCodec: 'H.264 / AVC',
+
         audioCodec: info.hasAudio
           ? 'AAC'
           : null,
+
         engine: 'ffmpeg',
+
         source: info,
       };
     } catch (error) {
@@ -525,11 +646,16 @@ export class FFmpegConverter implements Converter {
         stage: cancelled
           ? 'cancelled'
           : 'error',
-        lastError: normalized.message,
+
+        lastError:
+          normalized.message,
       });
 
       addLog(
-        cancelled ? 'warn' : 'error',
+        cancelled
+          ? 'warn'
+          : 'error',
+
         'FFmpeg',
         normalized.message,
       );
@@ -543,10 +669,6 @@ export class FFmpegConverter implements Converter {
 
       throw normalized;
     } finally {
-      /*
-       * Worker terminate edilmişse this.ffmpeg null olabilir.
-       * Listener'lar da worker ile birlikte yok olur.
-       */
       if (this.ffmpeg) {
         if (progressListenerAttached) {
           this.ffmpeg.off(
@@ -570,8 +692,13 @@ export class FFmpegConverter implements Converter {
         );
       }
 
-      await this.safeDelete(inputName);
-      await this.safeDelete(outputName);
+      await this.safeDelete(
+        inputName,
+      );
+
+      await this.safeDelete(
+        outputName,
+      );
     }
   }
 
@@ -592,19 +719,20 @@ export class FFmpegConverter implements Converter {
       message: string,
     ) => void,
   ): Promise<void> {
-    if (this.loaded && this.ffmpeg) {
+    if (
+      this.loaded &&
+      this.ffmpeg
+    ) {
       return;
     }
 
-    /*
-     * Aynı anda iki ayrı load işlemi başlamasını engeller.
-     */
     if (this.loadingPromise) {
       await this.loadingPromise;
       return;
     }
 
-    this.loadingPromise = this.loadFFmpeg(log);
+    this.loadingPromise =
+      this.loadFFmpeg(log);
 
     try {
       await this.loadingPromise;
@@ -670,11 +798,13 @@ export class FFmpegConverter implements Converter {
     }
 
     try {
-      await this.ffmpeg.deleteFile(path);
+      await this.ffmpeg.deleteFile(
+        path,
+      );
     } catch {
       /*
-       * Dosya mevcut değilse cleanup hatası
-       * dönüşümü başarısız yapmamalı.
+       * Dosyanın mevcut olmaması cleanup
+       * işlemini başarısız yapmamalı.
        */
     }
   }
@@ -683,25 +813,40 @@ export class FFmpegConverter implements Converter {
     return {
       engine: 'ffmpeg',
       stage: 'idle',
+
       mediabunnyVersion: '1.50.8',
       mediabunnyApi: null,
+
       ffmpegLoaded: this.loaded,
+
       inputVideoCodec: null,
       inputVideoCodecString: null,
       inputAudioCodec: null,
+
       outputVideoCodec: 'avc',
       outputAudioCodec: null,
-      targetVideoBitrate: null,
-      targetAudioBitrate: null,
+
+      targetVideoBitrate:
+        VIDEO_BITRATE,
+
+      targetAudioBitrate:
+        AUDIO_BITRATE,
+
       actualVideoBitrate: null,
       actualTotalBitrate: null,
+
       bitrateDeviationPercent: null,
       bitrateWithinTolerance: null,
+
       requestedQuality: null,
       keyFrameInterval: null,
-      hardwareAcceleration: 'no-preference',
+
+      hardwareAcceleration:
+        'no-preference',
+
       forceTranscode: true,
       conversionValid: null,
+
       discardedTracks: [],
       lastError: null,
       logs: [],
